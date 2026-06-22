@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const net = require('net');
+const tls = require('tls');
 const dgram = require('dgram');
 const fetch = require('node-fetch');
 const http = require('http');
@@ -7,10 +8,10 @@ const https = require('https');
 const url = require('url');
 
 // Constants
-const horse = Buffer.from("dHJvamFu", 'base64').toString(); // "trojan"
-const flash = Buffer.from("dm1lc3M=", 'base64').toString(); // "vmess"
-const v2 = Buffer.from("djJyYXk=", 'base64').toString(); // "v2ray"
-const neko = Buffer.from("Y2xhc2g=", 'base64').toString(); // "clash"
+const horse = Buffer.from("dHJvamFu", 'base64').toString();
+const flash = Buffer.from("dm1lc3M=", 'base64').toString();
+const v2 = Buffer.from("djJyYXk=", 'base64').toString();
+const neko = Buffer.from("Y2xhc2g=", 'base64').toString();
 
 const KV_PRX_URL = "https://raw.githubusercontent.com/backup-heavenly-demons/gateway/refs/heads/main/kvProxyList.json";
 const DNS_SERVER_ADDRESS = "8.8.8.8";
@@ -53,11 +54,13 @@ class GatewayServer {
     this.httpServer = null;
     this.activeUDPConnections = new Map();
     this.CORS_HEADER_OPTIONS = CORS_HEADER_OPTIONS;
+    this.connectionMode = "sni";
+    this.sniHost = "business.whatsapp.com";
+    this.useSNI = true;
   }
 
   // ==================== HTTP HANDLERS ====================
 
-  // Health check handler
   handleHealthCheck(req, res) {
     const healthData = {
       status: 'healthy',
@@ -85,13 +88,11 @@ class GatewayServer {
     res.end(JSON.stringify(healthData, null, 2));
   }
 
-  // Handle CORS preflight
   handleCorsPreflight(req, res) {
     res.writeHead(200, this.CORS_HEADER_OPTIONS);
     res.end();
   }
 
-  // API endpoint untuk mendapatkan daftar proxy
   async handleApiRequest(req, res, parsedUrl) {
     try {
       if (parsedUrl.pathname === '/api/proxies') {
@@ -125,7 +126,7 @@ class GatewayServer {
     }
   }
 
-  // Main HTTP request handler (Cyberpunk Dashboard Modern UI)
+  // Main HTTP request handler
   async handleHttpRequest(req, res) {
     const parsedUrl = url.parse(req.url, true);
     
@@ -150,7 +151,21 @@ class GatewayServer {
       const protocolHttp = req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
       
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`
+      res.end(this.getHTMLPage(currentHost, protocolWs, protocolHttp));
+      return;
+    }
+    
+    const targetReversePrx = process.env.REVERSE_PRX_TARGET;
+    if (targetReversePrx) {
+      await this.reverseWeb(req, res, targetReversePrx);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+    }
+  }
+
+  getHTMLPage(currentHost, protocolWs, protocolHttp) {
+    return `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -160,226 +175,419 @@ class GatewayServer {
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
     body {
-      font-family: 'JetBrains Mono', monospace;
-      background-color: #050806;
+      font-family: 'Inter', sans-serif;
+      background: #0a0a0f;
+      min-height: 100vh;
+      color: #e0e0e0;
     }
-    .neon-border {
-      border: 1px solid rgba(16, 185, 129, 0.3);
+
+    .glass {
+      background: rgba(16, 24, 40, 0.6);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(59, 130, 246, 0.15);
     }
-    .neon-border:hover {
-      border-color: rgba(16, 185, 129, 0.8);
+
+    .glass:hover {
+      border-color: rgba(59, 130, 246, 0.3);
     }
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
-    ::-webkit-scrollbar-track { background: #080c09; }
-    ::-webkit-scrollbar-thumb { background: #1b4332; border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #10b981; }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #60a5fa, #3b82f6, #1d4ed8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .neon-glow {
+      box-shadow: 0 0 30px rgba(59, 130, 246, 0.1), inset 0 0 30px rgba(59, 130, 246, 0.05);
+    }
+
+    .border-glow {
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      transition: all 0.3s ease;
+    }
+
+    .border-glow:hover {
+      border-color: rgba(59, 130, 246, 0.5);
+      box-shadow: 0 0 25px rgba(59, 130, 246, 0.08);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+      transition: all 0.3s ease;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(59, 130, 246, 0.3);
+    }
+
+    .btn-primary:active {
+      transform: scale(0.98);
+    }
+
+    .stat-card {
+      background: rgba(16, 24, 40, 0.8);
+      border: 1px solid rgba(59, 130, 246, 0.15);
+      border-radius: 12px;
+      padding: 20px;
+      transition: all 0.3s ease;
+    }
+
+    .stat-card:hover {
+      border-color: rgba(59, 130, 246, 0.3);
+      transform: translateY(-2px);
+    }
+
+    .input-dark {
+      background: rgba(16, 24, 40, 0.8);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      color: #e0e0e0;
+      transition: all 0.3s ease;
+      border-radius: 8px;
+      padding: 10px 14px;
+      width: 100%;
+    }
+
+    .input-dark:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .input-dark::placeholder {
+      color: rgba(224, 224, 224, 0.4);
+    }
+
+    select.input-dark {
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+      background-position: right 12px center;
+      background-repeat: no-repeat;
+      background-size: 20px;
+      padding-right: 40px;
+    }
+
+    .output-box {
+      background: rgba(11, 17, 29, 0.9);
+      border: 1px solid rgba(59, 130, 246, 0.15);
+      border-radius: 8px;
+      padding: 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 11px;
+      word-break: break-all;
+      max-height: 200px;
+      overflow-y: auto;
+      color: #93c5fd;
+    }
+
+    .output-box::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .output-box::-webkit-scrollbar-track {
+      background: rgba(16, 24, 40, 0.5);
+    }
+
+    .output-box::-webkit-scrollbar-thumb {
+      background: #3b82f6;
+      border-radius: 4px;
+    }
+
+    .toggle-switch {
+      position: relative;
+      width: 48px;
+      height: 26px;
+      background: rgba(75, 85, 99, 0.5);
+      border-radius: 13px;
+      cursor: pointer;
+      transition: 0.3s;
+      border: 1px solid rgba(59, 130, 246, 0.2);
+    }
+
+    .toggle-switch.active {
+      background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+      border-color: #3b82f6;
+    }
+
+    .toggle-switch .toggle-dot {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 20px;
+      height: 20px;
+      background: white;
+      border-radius: 50%;
+      transition: 0.3s;
+    }
+
+    .toggle-switch.active .toggle-dot {
+      transform: translateX(22px);
+    }
+
+    .badge {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .badge-blue {
+      background: rgba(59, 130, 246, 0.2);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.2);
+    }
+
+    .badge-green {
+      background: rgba(52, 211, 153, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.15);
+    }
+
+    .provider-tag {
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.15);
+      border-radius: 6px;
+      padding: 2px 10px;
+      font-size: 10px;
+      color: #93c5fd;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .pulsing-dot {
+      animation: pulse-dot 2s infinite;
+    }
+
+    @media (max-width: 768px) {
+      .stat-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+      .main-grid {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
-<body class="text-slate-300 min-h-screen flex flex-col justify-between selection:bg-emerald-600 selection:text-white">
-
-  <header class="relative overflow-hidden bg-[#020403] border-b border-emerald-500/20 px-4 py-3 shadow-[0_2px_15px_rgba(16,185,129,0.03)] sticky top-0 z-50">
-    <div class="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500 to-transparent opacity-50"></div>
-    <div class="max-w-7xl mx-auto flex items-center justify-between gap-2 z-10 relative">
-      <div class="flex items-center gap-3">
-        <div class="relative flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-gradient-to-br from-emerald-900 to-black border border-emerald-500/30">
-          <i class="fa-solid fa-shield-halved text-sm sm:text-base text-emerald-400"></i>
-          <div class="absolute inset-0 rounded-lg sm:rounded-xl border border-emerald-400/20 animate-ping opacity-20 hidden sm:block"></div>
-        </div>
-        <div class="flex flex-col">
-          <h1 class="text-base sm:text-lg font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-teal-300 to-cyan-500 uppercase leading-none">
-            J1BTNL <span class="font-light text-slate-300">CONFIG</span>
-          </h1>
-          <p class="text-[8px] sm:text-[9px] uppercase tracking-[0.15em] text-emerald-500/70 font-bold mt-1">SNI Injection Protocol</p>
-        </div>
-      </div>
-      <div class="flex items-center gap-2 bg-[#050a07] border border-emerald-800/60 px-2.5 py-1.5 rounded text-xs shadow-inner">
-        <div class="relative flex h-1.5 w-1.5">
-          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-          <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-        </div>
-        <span class="text-[9px] font-bold text-emerald-300 tracking-wider uppercase">ONLINE</span>
-      </div>
-    </div>
-  </header>
-
-  <main class="max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6 sm:space-y-8 flex-grow">
-    
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-      <div class="bg-[#0a100c] neon-border p-4 sm:p-5 rounded-xl flex items-center justify-between">
-        <div>
-          <p class="text-[10px] sm:text-xs text-slate-500 font-medium mb-1">SYSTEM UPTIME</p>
-          <p id="uptime-val" class="text-[11px] sm:text-xs md:text-sm font-bold text-white font-mono">Calculating...</p>
-        </div>
-        <i class="fa-solid fa-clock text-emerald-900/50 text-xl sm:text-2xl"></i>
-      </div>
-      <div class="bg-[#0a100c] neon-border p-4 sm:p-5 rounded-xl flex items-center justify-between">
-        <div>
-          <p class="text-[10px] sm:text-xs text-slate-500 font-medium mb-1">RAM</p>
-          <p class="text-base sm:text-lg font-bold text-white">${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB</p>
-        </div>
-        <i class="fa-solid fa-microchip text-emerald-900/50 text-xl sm:text-2xl"></i>
-      </div>
-      <div class="bg-[#0a100c] neon-border p-4 sm:p-5 rounded-xl flex items-center justify-between">
-        <div>
-          <p class="text-[10px] sm:text-xs text-slate-500 font-medium mb-1">UDP</p>
-          <p class="text-base sm:text-lg font-bold text-teal-400">ONLINE</p>
-        </div>
-        <i class="fa-solid fa-bolt text-teal-900/50 text-xl sm:text-2xl"></i>
-      </div>
-      <div class="bg-[#0a100c] neon-border p-4 sm:p-5 rounded-xl flex items-center justify-between">
-        <div>
-          <p id="date-val" class="text-[9px] text-slate-500 font-medium mb-1 uppercase tracking-wider">Loading Date...</p>
-          <p id="clock-val" class="text-base sm:text-lg font-bold text-emerald-400 font-mono">00:00:00</p>
-        </div>
-        <i class="fa-solid fa-calendar-days text-emerald-900/50 text-xl sm:text-2xl"></i>
-      </div>
-    </div>
-
-    <div class="bg-[#0a100c] border border-emerald-900/30 rounded-xl p-5 sm:p-6 space-y-5 shadow-lg shadow-black/50">
-      <div class="flex items-center gap-2 border-b border-emerald-900/30 pb-3">
-        <i class="fa-solid fa-key text-emerald-400"></i>
-        <h2 class="text-sm sm:text-md font-bold tracking-wide text-white">VLESS / TROJAN GENERATOR</h2>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8">
-        
-        <div class="space-y-4">
-          <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">UUID / Password</label>
-            <div class="flex gap-2">
-              <input id="uuidInput" type="text" value="853b8456-0c0b-4bfa-b3b4-b2619248a9bc" 
-                     class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition">
-              <button id="randomUuidBtn" class="bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-600 hover:text-white px-3 py-2 rounded-lg text-xs transition flex items-center gap-1 whitespace-nowrap">
-                <i class="fa-solid fa-shuffle"></i> RANDOM
-              </button>
-            </div>
+<body>
+  <div class="min-h-screen flex flex-col">
+    <!-- Header -->
+    <header class="glass border-b border-blue-500/10 sticky top-0 z-50">
+      <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center">
+            <i class="fas fa-shield-halved text-white text-lg"></i>
           </div>
-
           <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">Host / Domain</label>
-            <input id="hostInput" type="text" value="${currentHost}" 
-                   class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition">
+            <h1 class="text-lg font-bold gradient-text">J1BTNL CONFIG</h1>
+            <p class="text-[10px] text-blue-400/60 tracking-wider">SNI INJECTION PROTOCOL</p>
           </div>
-
-          <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">Port</label>
-            <input id="portInput" type="text" value="443" 
-                   class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition">
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-2 bg-blue-500/10 px-3 py-1.5 rounded-full border border-blue-500/20">
+            <div class="w-2 h-2 rounded-full bg-green-400 pulsing-dot"></div>
+            <span class="text-xs font-medium text-blue-300">ONLINE</span>
           </div>
+        </div>
+      </div>
+    </header>
 
-          <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">Path</label>
-            <div class="flex flex-col sm:flex-row gap-2">
-              <select id="pathSelect" 
-                      class="bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition w-full sm:w-auto">
-                <option value="/ID">🇮🇩 /ID (Indonesia)</option>
-                <option value="/SG">🇸🇬 /SG (Singapore)</option>
-                <option value="/JP">🇯🇵 /JP (Japan)</option>
-                <option value="/US">🇺🇸 /US (USA)</option>
-				<option value="/EUROPE">🇪🇺 /EUROPE</option>
-                <option value="/ASIA">🌏 /ASIA (Asia Region)</option>
-				<option value="/ALL">🌍 /ALL (Rotate Global)</option>
-                <option value="/AMERICA">🌎 /AMERICA</option>
-              </select>
-              <input id="pathInput" type="text" value="/ID" 
-                     class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition">
-            </div>
-          </div>
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
+      <!-- Stats -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="stat-card">
+          <p class="text-xs text-blue-400/60 font-medium mb-1">UPTIME</p>
+          <p id="uptime-val" class="text-lg font-bold text-blue-300">--</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-blue-400/60 font-medium mb-1">MEMORY</p>
+          <p class="text-lg font-bold text-blue-300">${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)} MB</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-blue-400/60 font-medium mb-1">PROVIDER</p>
+          <p id="provider-val" class="text-lg font-bold text-blue-300">--</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-blue-400/60 font-medium mb-1">SERVER</p>
+          <p id="server-val" class="text-lg font-bold text-blue-300">--</p>
+        </div>
+      </div>
 
-          <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">
-              <i class="fa-solid fa-fingerprint text-teal-400 mr-1"></i> SNI (Server Name Indication)
-            </label>
-            <div class="space-y-2 mb-2">
-              <select id="sniSelect" 
-                      class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-teal-500 focus:outline-none transition">
-                <option value="business.whatsapp.com">📱 business.whatsapp.com</option>
-                <option value="media-sin6-3.cdn.whatsapp.net">📡 media-sin6-3.cdn.whatsapp.net</option>
-                <option value="c.whatsapp.com">💬 c.whatsapp.com</option>
-                <option value="web.whatsapp.com">🌐 web.whatsapp.com</option>
-                <option value="v.whatsapp.net">📞 v.whatsapp.net</option>
-                <option value="live.iflix.com">🎬 live.iflix.com</option>
-                <option value="custom">✏️ CUSTOM SNI...</option>
-              </select>
-              
-              <input id="sniInput" type="text" value="business.whatsapp.com" 
-                     class="hidden w-full bg-[#0c130e] border border-teal-600/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-teal-500 focus:outline-none transition"
-                     placeholder="Ketik SNI Custom Anda di sini...">
-            </div>
-            <p class="text-[10px] text-slate-600">Pilih dari daftar atau pilih 'CUSTOM SNI' untuk mengetik manual.</p>
-          </div>
-
-          <div>
-            <label class="text-xs text-slate-400 font-medium mb-1.5 block">Nama / Remark</label>
-            <input id="remarkInput" type="text" value="J1BTNL" 
-                   class="w-full bg-[#0c130e] border border-emerald-900/50 rounded-lg px-3 py-2 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none transition">
-          </div>
-
-          <button id="generateBtn" 
-                  class="w-full bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold py-3 px-4 rounded-lg transition text-sm flex items-center justify-center gap-2 active:scale-95 shadow-lg shadow-emerald-900/50 mt-4">
-            <i class="fa-solid fa-bolt"></i> GENERATE CONFIG
-          </button>
+      <!-- Main Content -->
+      <div class="glass rounded-xl p-6 neon-glow">
+        <div class="flex items-center gap-3 border-b border-blue-500/10 pb-4 mb-6">
+          <i class="fas fa-key text-blue-400"></i>
+          <h2 class="text-base font-bold text-blue-300">VLESS / TROJAN GENERATOR</h2>
         </div>
 
-        <div class="space-y-4">
-          <label class="text-sm text-emerald-400 font-bold block border-b border-emerald-900/50 pb-2">📋 Hasil Generate</label>
-          
-          <div class="space-y-3">
-            <div class="bg-[#060a07] rounded-lg p-3 sm:p-4 border border-emerald-950 hover:border-emerald-800 transition">
-              <div class="flex items-center justify-between mb-2">
-                <span class="text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded font-bold border border-purple-500/20">VLESS PROTOCOL</span>
-                <button onclick="copyText(document.getElementById('vlessOutput').textContent)" 
-                        class="text-[10px] sm:text-xs bg-[#0c130e] border border-emerald-900/50 text-slate-400 hover:text-emerald-400 px-2 sm:px-3 py-1.5 rounded transition flex items-center gap-1 active:scale-95">
-                  <i class="fa-regular fa-copy"></i> COPY
+        <div class="grid md:grid-cols-2 gap-8">
+          <!-- Left Panel -->
+          <div class="space-y-4">
+            <!-- UUID -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">UUID / PASSWORD</label>
+              <div class="flex gap-2">
+                <input id="uuidInput" type="text" value="853b8456-0c0b-4bfa-b3b4-b2619248a9bc" class="input-dark">
+                <button id="randomUuidBtn" class="px-3 py-2 bg-blue-600/20 border border-blue-500/20 rounded-lg text-blue-400 hover:bg-blue-600 hover:text-white transition text-sm whitespace-nowrap">
+                  <i class="fas fa-shuffle"></i>
                 </button>
               </div>
-              <p id="vlessOutput" class="text-[10px] sm:text-xs text-purple-300 font-mono break-all leading-relaxed bg-[#080d0a] p-2 sm:p-3 rounded border border-emerald-900/30">
-                Loading...
-              </p>
             </div>
 
-            <div class="bg-[#060a07] rounded-lg p-3 sm:p-4 border border-emerald-950 hover:border-emerald-800 transition">
-              <div class="flex items-center justify-between mb-2">
-                <span class="text-[10px] bg-orange-500/10 text-orange-400 px-2 py-0.5 rounded font-bold border border-orange-500/20">TROJAN PROTOCOL</span>
-                <button onclick="copyText(document.getElementById('trojanOutput').textContent)" 
-                        class="text-[10px] sm:text-xs bg-[#0c130e] border border-emerald-900/50 text-slate-400 hover:text-emerald-400 px-2 sm:px-3 py-1.5 rounded transition flex items-center gap-1 active:scale-95">
-                  <i class="fa-regular fa-copy"></i> COPY
+            <!-- Host -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">HOST / DOMAIN</label>
+              <input id="hostInput" type="text" value="${currentHost}" class="input-dark">
+            </div>
+
+            <!-- Port -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">PORT</label>
+              <input id="portInput" type="text" value="443" class="input-dark">
+            </div>
+
+            <!-- Path -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">PATH</label>
+              <div class="flex gap-2">
+                <select id="pathSelect" class="input-dark flex-1">
+                  <option value="/ID">🇮🇩 /ID (Indonesia)</option>
+                  <option value="/SG">🇸🇬 /SG (Singapore)</option>
+                  <option value="/JP">🇯🇵 /JP (Japan)</option>
+                  <option value="/US">🇺🇸 /US (USA)</option>
+                  <option value="/EUROPE">🇪🇺 /EUROPE</option>
+                  <option value="/ASIA">🌏 /ASIA (Asia)</option>
+                  <option value="/ALL">🌍 /ALL (Global)</option>
+                  <option value="/AMERICA">🌎 /AMERICA</option>
+                </select>
+                <input id="pathInput" type="text" value="/ID" class="input-dark flex-1">
+              </div>
+            </div>
+
+            <!-- SNI Toggle -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">SNI (Server Name Indication)</label>
+              <div class="flex items-center gap-4">
+                <div class="flex items-center gap-3">
+                  <span class="text-sm text-blue-300/60">OFF</span>
+                  <div id="sniToggle" class="toggle-switch active">
+                    <div class="toggle-dot"></div>
+                  </div>
+                  <span class="text-sm text-blue-300/60">ON</span>
+                </div>
+                <span id="sniStatus" class="text-xs text-blue-400 font-medium">Enabled</span>
+              </div>
+              <div id="sniInputContainer" class="mt-2">
+                <select id="sniSelect" class="input-dark">
+                  <option value="business.whatsapp.com">📱 business.whatsapp.com</option>
+                  <option value="media-sin6-3.cdn.whatsapp.net">📡 media-sin6-3.cdn.whatsapp.net</option>
+                  <option value="c.whatsapp.com">💬 c.whatsapp.com</option>
+                  <option value="web.whatsapp.com">🌐 web.whatsapp.com</option>
+                  <option value="v.whatsapp.net">📞 v.whatsapp.net</option>
+                  <option value="live.iflix.com">🎬 live.iflix.com</option>
+                  <option value="custom">✏️ CUSTOM SNI</option>
+                </select>
+                <input id="sniInput" type="text" value="business.whatsapp.com" class="input-dark mt-2 hidden" placeholder="Ketik SNI Custom...">
+              </div>
+            </div>
+
+            <!-- Mode Connection -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">
+                <i class="fas fa-plug text-blue-400 mr-1"></i> MODE KONEKSI
+              </label>
+              <select id="modeSelect" class="input-dark">
+                <option value="sni">🔒 TLS + SNI (Default)</option>
+                <option value="tls">🔐 TLS tanpa SNI</option>
+                <option value="tcp">📡 TCP Biasa</option>
+              </select>
+            </div>
+
+            <!-- Remark -->
+            <div>
+              <label class="text-xs text-blue-400/60 font-medium block mb-1.5">REMARK</label>
+              <input id="remarkInput" type="text" value="J1BTNL" class="input-dark">
+            </div>
+
+            <button id="generateBtn" class="btn-primary w-full text-white font-semibold py-3 px-4 rounded-lg text-sm flex items-center justify-center gap-2">
+              <i class="fas fa-bolt"></i> GENERATE CONFIG
+            </button>
+          </div>
+
+          <!-- Right Panel -->
+          <div class="space-y-4">
+            <div class="flex items-center gap-2 border-b border-blue-500/10 pb-2">
+              <i class="fas fa-code text-blue-400"></i>
+              <span class="text-sm font-semibold text-blue-300">HASIL GENERATE</span>
+            </div>
+
+            <!-- VLESS -->
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="badge badge-blue">VLESS PROTOCOL</span>
+                <button onclick="copyText(document.getElementById('vlessOutput').textContent)" class="text-xs text-blue-400/60 hover:text-blue-400 transition flex items-center gap-1">
+                  <i class="far fa-copy"></i> COPY
                 </button>
               </div>
-              <p id="trojanOutput" class="text-[10px] sm:text-xs text-orange-300 font-mono break-all leading-relaxed bg-[#080d0a] p-2 sm:p-3 rounded border border-emerald-900/30">
-                Loading...
-              </p>
+              <div id="vlessOutput" class="output-box">Loading...</div>
             </div>
-          </div>
 
-          <div class="bg-[#0c130e] border border-emerald-900/50 rounded-lg p-3 sm:p-4 mt-2">
-            <div class="flex items-center justify-between mb-2">
-              <p class="text-[10px] font-bold text-emerald-500/80">🔗 CLASH META / V2RAY RAW CONFIG</p>
-              <button onclick="copyText(document.getElementById('clashOutput').textContent)" 
-                      class="text-xs text-slate-400 hover:text-emerald-400 transition flex items-center gap-1">
-                <i class="fa-regular fa-copy"></i>
-              </button>
+            <!-- TROJAN -->
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="badge badge-blue">TROJAN PROTOCOL</span>
+                <button onclick="copyText(document.getElementById('trojanOutput').textContent)" class="text-xs text-blue-400/60 hover:text-blue-400 transition flex items-center gap-1">
+                  <i class="far fa-copy"></i> COPY
+                </button>
+              </div>
+              <div id="trojanOutput" class="output-box">Loading...</div>
             </div>
-            <pre id="clashOutput" class="text-[10px] sm:text-[11px] text-slate-400 font-mono break-all leading-relaxed whitespace-pre-wrap bg-[#080d0a] p-2 sm:p-3 rounded border border-emerald-900/30 max-h-56 overflow-y-auto">Loading...</pre>
+
+            <!-- CLASH META -->
+            <div>
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="badge badge-blue">CLASH META / V2RAY</span>
+                <button onclick="copyText(document.getElementById('clashOutput').textContent)" class="text-xs text-blue-400/60 hover:text-blue-400 transition flex items-center gap-1">
+                  <i class="far fa-copy"></i> COPY
+                </button>
+              </div>
+              <pre id="clashOutput" class="output-box" style="max-height:150px;">Loading...</pre>
+            </div>
+
+            <!-- Provider Info -->
+            <div class="flex flex-wrap gap-2 pt-2">
+              <span class="provider-tag"><i class="fas fa-server mr-1"></i> Provider: <span id="providerDisplay">Detecting...</span></span>
+              <span class="provider-tag"><i class="fas fa-globe mr-1"></i> Server: <span id="serverDisplay">Detecting...</span></span>
+              <span class="provider-tag"><i class="fas fa-signal mr-1"></i> Mode: <span id="modeDisplay">SNI</span></span>
+            </div>
           </div>
         </div>
-
       </div>
-    </div>
+    </main>
 
-  </main>
+    <footer class="border-t border-blue-500/10 bg-[#0a0a0f] px-4 py-4">
+      <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-blue-400/40">
+        <p>&copy; ${new Date().getFullYear()} J1BTNL CONFIG SNI. ALL SYSTEMS OPERATIONAL.</p>
+        <p class="flex items-center gap-2"><i class="fas fa-shield-check text-blue-500/60"></i> SECURED BY END-TO-END KERNEL TUNNEL</p>
+      </div>
+    </footer>
+  </div>
 
-  <footer class="border-t border-emerald-950 bg-[#040605] px-4 sm:px-6 py-4 sm:py-5 text-center text-[10px] sm:text-xs text-slate-600">
-    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 sm:gap-3">
-      <p>&copy; ${new Date().getFullYear()} J1BTNL CONFIG SNI. ALL SYSTEM VECTORS OPERATIONAL.</p>
-      <p class="flex items-center gap-1 sm:gap-2"><i class="fa-solid fa-shield-check text-emerald-500/60"></i> SECURED BY END-TO-END KERNEL TUNNEL</p>
-    </div>
-  </footer>
-
-  <div id="toast" class="fixed bottom-6 right-6 bg-emerald-600 text-white font-semibold px-4 py-3 rounded-lg shadow-lg shadow-emerald-900/50 opacity-0 pointer-events-none transition-all duration-300 transform translate-y-2 text-xs z-50 flex items-center gap-2 border border-emerald-400/50">
-    <i class="fa-solid fa-circle-check"></i> ENDPOINT COPIED TO CLIPBOARD
+  <div id="toast" class="fixed bottom-6 right-6 bg-blue-600 text-white font-semibold px-5 py-3 rounded-xl shadow-2xl opacity-0 pointer-events-none transition-all duration-300 transform translate-y-4 text-sm flex items-center gap-2 border border-blue-400/30">
+    <i class="fas fa-check-circle"></i> COPIED TO CLIPBOARD
   </div>
 
   <script>
@@ -387,63 +595,67 @@ class GatewayServer {
     function copyText(text) {
       navigator.clipboard.writeText(text).then(() => {
         const toast = document.getElementById('toast');
-        toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-2');
+        toast.classList.remove('opacity-0', 'pointer-events-none', 'translate-y-4');
         toast.classList.add('opacity-100', 'translate-y-0');
         setTimeout(() => {
           toast.classList.remove('opacity-100', 'translate-y-0');
-          toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-2');
+          toast.classList.add('opacity-0', 'pointer-events-none', 'translate-y-4');
         }, 2500);
       });
     }
 
-    // ==================== LOGIKA UPTIME & REAL-TIME CLOCK ====================
+    // ==================== DETECT PROVIDER & SERVER ====================
+    async function detectProviderAndServer() {
+      try {
+        const response = await fetch('https://ipapi.co/json/');
+        const data = await response.json();
+        
+        const provider = data.org || data.asn || 'Unknown';
+        const server = data.city ? data.city + ', ' + data.country_name : data.country_name || 'Unknown';
+        
+        document.getElementById('provider-val').textContent = provider;
+        document.getElementById('server-val').textContent = server;
+        document.getElementById('providerDisplay').textContent = provider;
+        document.getElementById('serverDisplay').textContent = server;
+      } catch (error) {
+        console.error('Error detecting provider:', error);
+        document.getElementById('provider-val').textContent = '--';
+        document.getElementById('server-val').textContent = '--';
+        document.getElementById('providerDisplay').textContent = 'N/A';
+        document.getElementById('serverDisplay').textContent = 'N/A';
+      }
+    }
+
+    // ==================== UPTIME & CLOCK ====================
     let totalSeconds = ${Math.floor(process.uptime())};
 
-    function updateDashboardTime() {
-      // 1. Hitung Uptime Struktural (Hari, Jam, Menit, Detik)
+    function updateDashboard() {
       const d = Math.floor(totalSeconds / 86400);
       const h = Math.floor((totalSeconds % 86400) / 3600);
       const m = Math.floor((totalSeconds % 3600) / 60);
       const s = totalSeconds % 60;
 
-      // Format string ringkas agar muat di grid: "1d 02h 15m 30s"
       const uptimeStr = (d > 0 ? d + 'd ' : '') + 
-                        (h < 10 ? '0' + h : h) + 'h ' + 
-                        (m < 10 ? '0' + m : m) + 'm ' + 
-                        (s < 10 ? '0' + s : s) + 's';
+                        String(h).padStart(2, '0') + 'h ' + 
+                        String(m).padStart(2, '0') + 'm ' + 
+                        String(s).padStart(2, '0') + 's';
       
-      const uptimeEl = document.getElementById('uptime-val');
-      if (uptimeEl) uptimeEl.innerText = uptimeStr;
-
-      // 2. Hitung Jam dan Tanggal Nyata (Real-time Server Clock)
-      const now = new Date();
-      const dateOptions = { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' };
-      const dateStr = now.toLocaleDateString('id-ID', dateOptions);
-      const timeStr = now.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-
-      const dateEl = document.getElementById('date-val');
-      const clockEl = document.getElementById('clock-val');
-      
-      if (dateEl) dateEl.innerText = dateStr;
-      if (clockEl) clockEl.innerText = timeStr.replace(/\./g, ':'); // Pastikan separator menggunakan titik dua
+      document.getElementById('uptime-val').textContent = uptimeStr;
     }
 
-    // Jalankan kalkulasi pertama kali & set trigger interval per 1 detik
-    updateDashboardTime();
+    updateDashboard();
     setInterval(() => {
       totalSeconds++;
-      updateDashboardTime();
+      updateDashboard();
     }, 1000);
 
-    // ==================== GENERATOR SCRIPTS ====================
+    // ==================== GENERATOR ====================
     function generateUUID() {
-      const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
       });
-      document.getElementById('uuidInput').value = uuid;
-      generateAccounts();
     }
 
     function generateTrojanPass() {
@@ -461,155 +673,171 @@ class GatewayServer {
 
     function generateAccounts() {
       try {
-        const uuidEl = document.getElementById('uuidInput');
-        const hostEl = document.getElementById('hostInput');
-        const portEl = document.getElementById('portInput');
-        const pathEl = document.getElementById('pathInput');
-        const sniEl = document.getElementById('sniInput');
-        const remarkEl = document.getElementById('remarkInput');
-        const vlessOut = document.getElementById('vlessOutput');
-        const trojanOut = document.getElementById('trojanOutput');
-        const clashOut = document.getElementById('clashOutput');
-
-        if (!uuidEl || !hostEl || !portEl || !pathEl || !sniEl || !remarkEl || !vlessOut || !trojanOut || !clashOut) {
-          return;
-        }
-
-        const uuid = uuidEl.value.trim() || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc';
-        const host = hostEl.value.trim() || '${currentHost}';
-        const port = portEl.value.trim() || '443';
-        const path = pathEl.value.trim() || '/ALL';
-        const sni = sniEl.value.trim() || 'business.whatsapp.com';
-        const remark = remarkEl.value.trim() || 'J1BTNL';
+        const uuid = document.getElementById('uuidInput').value.trim() || '853b8456-0c0b-4bfa-b3b4-b2619248a9bc';
+        const host = document.getElementById('hostInput').value.trim() || '${currentHost}';
+        const port = document.getElementById('portInput').value.trim() || '443';
+        const path = document.getElementById('pathInput').value.trim() || '/ID';
+        const sni = document.getElementById('sniInput').value.trim() || 'business.whatsapp.com';
+        const mode = document.getElementById('modeSelect').value || 'sni';
+        const remark = document.getElementById('remarkInput').value.trim() || 'J1BTNL';
+        const useSNI = document.getElementById('sniToggle').classList.contains('active');
 
         const encodedPath = encodeURIComponent(path);
         const encodedRemark = encodeURIComponent(remark);
 
+        let flowParam = '';
+        let securityParam = '';
+        let sniParam = '';
+
+        if (mode === 'sni' && useSNI) {
+          securityParam = '&security=tls';
+          sniParam = '&sni=' + encodeURIComponent(sni);
+          flowParam = '&fp=randomized';
+        } else if (mode === 'tls') {
+          securityParam = '&security=tls';
+          sniParam = '';
+          flowParam = '&fp=randomized';
+        } else {
+          securityParam = '';
+          sniParam = '';
+          flowParam = '';
+        }
+
         // VLESS
         const vlessUrl = 'vless://' + uuid + '@' + host + ':' + port +
-                         '?encryption=none&security=tls&sni=' + sni +
-                         '&fp=randomized&type=ws&host=' + host +
+                         '?encryption=none' + securityParam + sniParam +
+                         flowParam + '&type=ws&host=' + host +
                          '&path=' + encodedPath + '#' + encodedRemark;
 
         // TROJAN
         const trojanPass = generateTrojanPass();
-        const trojanUrl = 'trojan://' + trojanPass + '@' + host + ':' + port +
-                          '?sni=' + sni +
-                          '&type=ws&host=' + host +
-                          '&path=' + encodedPath + '#' + encodedRemark;
+        let trojanUrl = 'trojan://' + trojanPass + '@' + host + ':' + port;
 
-        vlessOut.textContent = vlessUrl;
-        trojanOut.textContent = trojanUrl;
+        if (mode === 'sni' && useSNI) {
+          trojanUrl += '?security=tls&sni=' + encodeURIComponent(sni) + '&type=ws&host=' + host + '&path=' + encodedPath + '#' + encodedRemark;
+        } else if (mode === 'tls') {
+          trojanUrl += '?security=tls&type=ws&host=' + host + '&path=' + encodedPath + '#' + encodedRemark;
+        } else {
+          trojanUrl += '?type=ws&host=' + host + '&path=' + encodedPath + '#' + encodedRemark;
+        }
 
-        // CLASH META format
-        const clashConfig = '- name: "' + remark + ' VLESS"\\n' +
-                            '  type: vless\\n' +
-                            '  server: ' + host + '\\n' +
-                            '  port: ' + port + '\\n' +
-                            '  uuid: ' + uuid + '\\n' +
-                            '  network: ws\\n' +
-                            '  tls: true\\n' +
-                            '  udp: true\\n' +
-                            '  sni: "' + sni + '"\\n' +
-                            '  client-fingerprint: randomized\\n' +
-                            '  ws-opts:\\n' +
-                            '    path: "' + path + '"\\n' +
-                            '    headers:\\n' +
-                            '      host: "' + host + '"\\n\\n' +
-                            '- name: "' + remark + ' TROJAN"\\n' +
-                            '  type: trojan\\n' +
-                            '  server: ' + host + '\\n' +
-                            '  port: ' + port + '\\n' +
-                            '  password: ' + trojanPass + '\\n' +
-                            '  network: ws\\n' +
-                            '  tls: true\\n' +
-                            '  udp: true\\n' +
-                            '  sni: "' + sni + '"\\n' +
-                            '  ws-opts:\\n' +
-                            '    path: "' + path + '"\\n' +
-                            '    headers:\\n' +
-                            '      host: "' + host + '"';
+        document.getElementById('vlessOutput').textContent = vlessUrl;
+        document.getElementById('trojanOutput').textContent = trojanUrl;
 
-        clashOut.textContent = clashConfig;
+        // CLASH META
+        let clashConfig = '- name: "' + remark + ' VLESS"\\n' +
+                          '  type: vless\\n' +
+                          '  server: ' + host + '\\n' +
+                          '  port: ' + port + '\\n' +
+                          '  uuid: ' + uuid + '\\n' +
+                          '  network: ws\\n';
+
+        if (mode === 'sni' && useSNI) {
+          clashConfig += '  tls: true\\n' +
+                         '  sni: "' + sni + '"\\n' +
+                         '  client-fingerprint: randomized\\n';
+        } else if (mode === 'tls') {
+          clashConfig += '  tls: true\\n' +
+                         '  client-fingerprint: randomized\\n';
+        } else {
+          clashConfig += '  tls: false\\n';
+        }
+
+        clashConfig += '  udp: true\\n' +
+                       '  ws-opts:\\n' +
+                       '    path: "' + path + '"\\n' +
+                       '    headers:\\n' +
+                       '      host: "' + host + '"\\n\\n' +
+                       '- name: "' + remark + ' TROJAN"\\n' +
+                       '  type: trojan\\n' +
+                       '  server: ' + host + '\\n' +
+                       '  port: ' + port + '\\n' +
+                       '  password: ' + trojanPass + '\\n' +
+                       '  network: ws\\n';
+
+        if (mode === 'sni' && useSNI) {
+          clashConfig += '  tls: true\\n' +
+                         '  sni: "' + sni + '"\\n';
+        } else if (mode === 'tls') {
+          clashConfig += '  tls: true\\n';
+        } else {
+          clashConfig += '  tls: false\\n';
+        }
+
+        clashConfig += '  udp: true\\n' +
+                       '  ws-opts:\\n' +
+                       '    path: "' + path + '"\\n' +
+                       '    headers:\\n' +
+                       '      host: "' + host + '"';
+
+        document.getElementById('clashOutput').textContent = clashConfig;
+        document.getElementById('modeDisplay').textContent = mode.toUpperCase();
       } catch (err) {
         console.error('Generator Error:', err);
       }
     }
 
     // ==================== EVENT LISTENERS ====================
-    setTimeout(function() {
+    // SNI Toggle
+    const sniToggle = document.getElementById('sniToggle');
+    const sniStatus = document.getElementById('sniStatus');
+    const sniSelect = document.getElementById('sniSelect');
+    const sniInput = document.getElementById('sniInput');
+    const sniInputContainer = document.getElementById('sniInputContainer');
+
+    sniToggle.addEventListener('click', function() {
+      this.classList.toggle('active');
+      const isActive = this.classList.contains('active');
+      sniStatus.textContent = isActive ? 'Enabled' : 'Disabled';
+      sniStatus.style.color = isActive ? '#60a5fa' : '#9ca3af';
+      document.getElementById('modeDisplay').textContent = isActive ? 'SNI' : 'NO-SNI';
       generateAccounts();
-    }, 300);
+    });
 
-    setTimeout(function() {
-      const elements = ['uuidInput', 'hostInput', 'portInput', 'pathInput', 'sniInput', 'remarkInput'];
-      elements.forEach(function(id) {
-        const el = document.getElementById(id);
-        if (el) {
-          el.addEventListener('input', generateAccounts);
-        }
-      });
-
-      const pathSelect = document.getElementById('pathSelect');
-      if (pathSelect) {
-        pathSelect.addEventListener('change', function() {
-          const pathInput = document.getElementById('pathInput');
-          if (pathInput) {
-            pathInput.value = this.value;
-            generateAccounts();
-          }
-        });
+    // SNI Select
+    sniSelect.addEventListener('change', function() {
+      if (this.value === 'custom') {
+        sniInput.classList.remove('hidden');
+        sniInput.value = '';
+        sniInput.focus();
+      } else {
+        sniInput.classList.add('hidden');
+        sniInput.value = this.value;
+        generateAccounts();
       }
+    });
 
-      // SHOW/HIDE SNI INPUT KONDISIONAL
-      const sniSelect = document.getElementById('sniSelect');
-      if (sniSelect) {
-        sniSelect.addEventListener('change', function() {
-          const sniInput = document.getElementById('sniInput');
-          if (sniInput) {
-            if (this.value === 'custom') {
-              sniInput.classList.remove('hidden');
-              sniInput.value = '';
-              sniInput.focus();
-            } else {
-              sniInput.classList.add('hidden');
-              sniInput.value = this.value;
-              generateAccounts();
-            }
-          }
-        });
-      }
+    // All inputs
+    ['uuidInput', 'hostInput', 'portInput', 'pathInput', 'remarkInput', 'modeSelect'].forEach(id => {
+      document.getElementById(id).addEventListener('input', generateAccounts);
+      document.getElementById(id).addEventListener('change', generateAccounts);
+    });
 
-      const genBtn = document.getElementById('generateBtn');
-      if (genBtn) {
-        genBtn.addEventListener('click', function(e) {
-          e.preventDefault();
-          generateAccounts();
-        });
-      }
+    // Path Select
+    document.getElementById('pathSelect').addEventListener('change', function() {
+      document.getElementById('pathInput').value = this.value;
+      generateAccounts();
+    });
 
-      const randBtn = document.getElementById('randomUuidBtn');
-      if (randBtn) {
-        randBtn.addEventListener('click', function(e) {
-          e.preventDefault();
-          generateUUID();
-        });
-      }
-    }, 600);
+    // Random UUID
+    document.getElementById('randomUuidBtn').addEventListener('click', function() {
+      document.getElementById('uuidInput').value = generateUUID();
+      generateAccounts();
+    });
+
+    // Generate Button
+    document.getElementById('generateBtn').addEventListener('click', function(e) {
+      e.preventDefault();
+      generateAccounts();
+    });
+
+    // ==================== INIT ====================
+    detectProviderAndServer();
+    setTimeout(generateAccounts, 500);
   </script>
 </body>
 </html>
-      `);
-      return;
-    }
-    
-    const targetReversePrx = process.env.REVERSE_PRX_TARGET;
-    if (targetReversePrx) {
-      await this.reverseWeb(req, res, targetReversePrx);
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not Found');
-    }
+    `;
   }
 
   // ==================== PROXY LIST MANAGEMENT ====================
@@ -733,9 +961,20 @@ class GatewayServer {
       const path = parsedUrl.pathname;
       const host = request.headers.host || 'localhost';
 
-      console.log(`WebSocket request path: ${path} from ${request.socket.remoteAddress}`);
+      const queryParams = parsedUrl.query || {};
+      if (queryParams.mode) {
+        this.connectionMode = queryParams.mode;
+      }
+      if (queryParams.sni) {
+        this.sniHost = queryParams.sni;
+      }
+      if (queryParams.useSNI) {
+        this.useSNI = queryParams.useSNI === 'true';
+      }
 
-      // Format /PROXYLIST/ID,SG,JP
+      console.log(`WebSocket request path: ${path} from ${request.socket.remoteAddress}`);
+      console.log(`Connection Mode: ${this.connectionMode}, SNI: ${this.sniHost}, Use SNI: ${this.useSNI}`);
+
       const proxyListMatch = path.match(/^\/PROXYLIST\/([A-Z]{2}(,[A-Z]{2})*)$/i);
       if (proxyListMatch) {
         const countryCodes = proxyListMatch[1].toUpperCase().split(",");
@@ -765,7 +1004,6 @@ class GatewayServer {
         return;
       }
 
-      // Format /ALL atau /ALLn
       const allMatch = path.match(/^\/ALL(\d+)?$/i);
       if (allMatch) {
         const index = allMatch[1] ? parseInt(allMatch[1], 10) - 1 : null;
@@ -815,7 +1053,6 @@ class GatewayServer {
         return;
       }
 
-      // Format /PUTAR atau /PUTARn
       const putarMatch = path.match(/^\/PUTAR(\d+)?$/i);
       if (putarMatch) {
         const countryCount = putarMatch[1] ? parseInt(putarMatch[1], 10) : null;
@@ -875,7 +1112,6 @@ class GatewayServer {
         return;
       }
 
-      // Format /REGION atau /REGIONn
       const regionMatch = path.match(/^\/([A-Z]+)(\d+)?$/i);
       if (regionMatch) {
         const regionKey = regionMatch[1].toUpperCase();
@@ -943,7 +1179,6 @@ class GatewayServer {
         }
       }
 
-      // Format /CC atau /CCn (Country Code)
       const countryMatch = path.match(/^\/([A-Z]{2})(\d+)?$/);
       if (countryMatch) {
         const countryCode = countryMatch[1].toUpperCase();
@@ -992,8 +1227,7 @@ class GatewayServer {
         return;
       }
 
-      // Format /ip:port atau /ip=port atau /ip-port
-      const ipPortMatch = path.match(/^\/(.+[:=-]\d+)$/);
+      const ipPortMatch = path.match(/^\/(.+[:=-]\\d+)$/);
       if (ipPortMatch) {
         this.prxIP = ipPortMatch[1].replace(/[=:-]/, ":");
         console.log(`Direct Proxy IP: ${this.prxIP}`);
@@ -1001,7 +1235,6 @@ class GatewayServer {
         return;
       }
 
-      // Format lama untuk kompatibilitas
       if (path.length === 4 || path.includes(',')) {
         const prxKeys = path.replace("/", "").toUpperCase().split(",");
         const prxKey = prxKeys[Math.floor(Math.random() * prxKeys.length)];
@@ -1126,47 +1359,105 @@ class GatewayServer {
     return "ss";
   }
 
+  // ==================== TCP OUTBOUND HANDLER ====================
+
   async handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
     const connectAndWrite = (address, port) => {
       return new Promise((resolve, reject) => {
-        const tcpSocket = net.createConnection({
-          host: address,
-          port: port
-        }, () => {
-          log(`connected to ${address}:${port}`);
-          tcpSocket.write(rawClientData);
-          resolve(tcpSocket);
-        });
-        tcpSocket.on('error', reject);
+        let tcpSocket;
+        const mode = this.connectionMode || "sni";
+        const useSNI = this.useSNI !== false;
+        const sniHost = this.sniHost || "business.whatsapp.com";
+
+        log(`Connecting with mode: ${mode}, SNI: ${useSNI ? sniHost : 'Disabled'}`);
+
+        try {
+          if (mode === "sni" && useSNI) {
+            tcpSocket = tls.connect({
+              host: address,
+              port: port,
+              servername: sniHost,
+              rejectUnauthorized: false
+            }, () => {
+              log(`TLS + SNI connected to ${address}:${port} with SNI: ${sniHost}`);
+              tcpSocket.write(rawClientData);
+              resolve(tcpSocket);
+            });
+          } else if (mode === "tls" || (mode === "sni" && !useSNI)) {
+            tcpSocket = tls.connect({
+              host: address,
+              port: port,
+              rejectUnauthorized: false
+            }, () => {
+              log(`TLS (no SNI) connected to ${address}:${port}`);
+              tcpSocket.write(rawClientData);
+              resolve(tcpSocket);
+            });
+          } else {
+            tcpSocket = net.createConnection({
+              host: address,
+              port: port
+            }, () => {
+              log(`TCP connected to ${address}:${port}`);
+              tcpSocket.write(rawClientData);
+              resolve(tcpSocket);
+            });
+          }
+
+          tcpSocket.on('error', (err) => {
+            log(`Connection error: ${err.message}`);
+            reject(err);
+          });
+
+        } catch (err) {
+          log(`Connection creation error: ${err.message}`);
+          reject(err);
+        }
       });
     };
 
     const retry = async () => {
       try {
-        const tcpSocket = await connectAndWrite(
-          this.prxIP.split(/[:=-]/)[0] || addressRemote,
-          this.prxIP.split(/[:=-]/)[1] || portRemote
-        );
+        const proxyAddress = this.prxIP.split(/[:=-]/)[0] || addressRemote;
+        const proxyPort = parseInt(this.prxIP.split(/[:=-]/)[1]) || portRemote;
+        
+        log(`Retrying with proxy: ${proxyAddress}:${proxyPort}`);
+        const tcpSocket = await connectAndWrite(proxyAddress, proxyPort);
         remoteSocket.value = tcpSocket;
         
-        tcpSocket.on('close', () => { webSocket.close(); });
-        tcpSocket.on('error', (error) => { webSocket.close(); });
+        tcpSocket.on('close', () => { 
+          log('TCP socket closed');
+          webSocket.close(); 
+        });
+        tcpSocket.on('error', (error) => { 
+          log(`TCP socket error: ${error.message}`);
+          webSocket.close(); 
+        });
 
         this.remoteSocketToWS(tcpSocket, webSocket, responseHeader, null, log);
       } catch (error) {
+        log(`Retry failed: ${error.message}`);
         webSocket.close();
       }
     };
 
     try {
+      log(`Connecting directly to ${addressRemote}:${portRemote}`);
       const tcpSocket = await connectAndWrite(addressRemote, portRemote);
       remoteSocket.value = tcpSocket;
       
-      tcpSocket.on('close', () => { webSocket.close(); });
-      tcpSocket.on('error', (error) => { webSocket.close(); });
+      tcpSocket.on('close', () => { 
+        log('TCP socket closed');
+        webSocket.close(); 
+      });
+      tcpSocket.on('error', (error) => { 
+        log(`TCP socket error: ${error.message}`);
+        webSocket.close(); 
+      });
 
       this.remoteSocketToWS(tcpSocket, webSocket, responseHeader, retry, log);
     } catch (error) {
+      log(`Direct connection failed: ${error.message}, retrying...`);
       await retry();
     }
   }
@@ -1500,6 +1791,9 @@ class GatewayServer {
 
     server.listen(port, '0.0.0.0', () => {
       console.log(`✅ Gateway server running on port ${port}`);
+      console.log(`📡 Default connection mode: ${this.connectionMode}`);
+      console.log(`🔑 Default SNI: ${this.sniHost}`);
+      console.log(`🔒 SNI Enabled: ${this.useSNI}`);
     });
 
     this.httpServer = server;
